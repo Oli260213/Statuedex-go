@@ -26,7 +26,8 @@
 }
 
     #sidebar {
-      width: 340px;
+       width: 320px;
+      max-width: 80vw;
       background: #0f0f0f;
       color: white;
       padding: 10px;
@@ -441,23 +442,7 @@ function render() {
 
 render();
 
-function resetGame() {
-  if (!confirm("Reset XP, level et statues collectées ?")) return;
 
-  localStorage.removeItem("xp");
-  localStorage.removeItem("level");
-  localStorage.removeItem("collected");
-
-  xp = 0;
-  level = 1;
-  collected = [];
-
-  updateXP();
-  render();
-  updateAllPopups();
-
-  alert("Game reset !");
-}
 
 // SIDEBAR DRAG
 let sidebar = document.getElementById("sidebar");
