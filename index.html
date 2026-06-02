@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>StatueDex GO V7</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      display: flex;
+    }
+
+    @keyframes pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+
+.captureAnim {
+  animation: pop 0.4s;
+}
+
+    #sidebar {
+      width: 340px;
+      background: #0f0f0f;
+      color: white;
+      padding: 10px;
+      overflow-y: auto;
+      height: 100vh;
+      box-sizing: border-box;
+      transition: transform 0.3s ease;
+      position: relative;
+      z-index: 1000;
+    }
+
+    #sidebar.closed {
+      transform: translateY(85%);
+    }
+
+    #dragHandle {
+      width: 100%;
+      text-align: center;
+      padding: 6px;
+      cursor: grab;
+      font-size: 18px;
+      color: #aaa;
+    }
+
+    #map {
+      flex: 1;
+      height: 100vh;
+    }
+
+    .card {
+      background: #1e1e1e;
+      margin-bottom: 10px;
+      padding: 10px;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+
+    .card:hover { background: #2a2a2a; }
+
+    .title { font-weight: bold; margin-bottom: 5px; }
+
+    .status { font-size: 12px; margin-top: 5px; }
+    .status.yes { color: lime; }
+    .status.no { color: red; }
+
+    .distance { font-size: 11px; color: #aaa; }
+
+    .statue-icon {
+      border-radius: 50%;
+      border: 3px solid white;
+    }
+
+    .leaflet-popup {
+      transform: translateY(-10px);
+    }
+
+    #xpBarContainer {
+      width: 100%;
+      height: 10px;
+      background: #333;
+      border-radius: 6px;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+
+    #xpBar {
+      height: 100%;
+      width: 0%;
+      background: lime;
+      transition: width 0.3s ease;
+    }
+
+    #xpText {
+      font-size: 12px;
+      color: #aaa;
+      margin-bottom: 10px;
+    }
+
+  </style>
+</head>
+
+<body>
+
+<div id="sidebar">
+  <div id="dragHandle">⬍</div>
+
+  <h2>🗺️ StatueDex GO V7</h2>
+
+  <div id="xpText"></div>
+  <div id="xpBarContainer"><div id="xpBar"></div></div>
+  
+  <button onclick="toggleCollection()">📖 Ma collection</button>
+<div id="collection" style="display:none;"></div>
+
+<button onclick="resetGame()" style="margin-top:10px; width:100%; padding:10px; background:red; color:white; border:none; border-radius:8px; cursor:pointer;">
+  🔄 Reset game
+</button>
+
+  <div id="list"></div>
+</div>
+
+<div id="map"></div>
+
+<script>
+
+  const soundCollect = new Audio("collect.mp3");
+const soundLevelUp = new Audio("levelup.mp3");
+const soundTooFar = new Audio("toofar.mp3");
+
+// PLAYER + XP
+let playerLat = 50.8503;
+let playerLng = 4.3517;
+
+let xp = parseInt(localStorage.getItem("xp") || "0");
+let level = parseInt(localStorage.getItem("level") || "1");
+
+const map = L.map('map').setView([50.8503, 4.3517], 13);
+
+// BLUE DOT (toi)
+const playerMarker = L.circleMarker([playerLat, playerLng], {
+  radius: 8,
+  color: "#fff",
+  fillColor: "#2a9df4",
+  fillOpacity: 1,
+  weight: 3
+}).addTo(map);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+// GPS
+navigator.geolocation.watchPosition(pos => {
+  playerLat = pos.coords.latitude;
+  playerLng = pos.coords.longitude;
+  playerMarker.setLatLng([playerLat, playerLng]);
+  const radar = L.circle([playerLat, playerLng], {
+  radius: 50,
+  color: "lime",
+  fillColor: "lime",
+  fillOpacity: 0.1
+}).addTo(map);
+
+  render();
+  updateAllPopups();
+});
+navigator.geolocation.watchPosition(pos => {
+
+  if (!DEV_MODE) {
+    playerLat = pos.coords.latitude;
+    playerLng = pos.coords.longitude;
+  }
+
+  playerMarker.setLatLng([playerLat, playerLng]);
+
+  render();
+  updateAllPopups();
+});
+
+// STORAGE
+let collected = JSON.parse(localStorage.getItem("collected") || "[]");
+
+function save() {
+  localStorage.setItem("collected", JSON.stringify(collected));
+}
+
+function isCollected(id) {
+  return collected.includes(id);
+}
+
+// DISTANCE
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2-lat1) * Math.PI/180;
+  const dLon = (lon2-lon1) * Math.PI/180;
+
+  const a =
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1*Math.PI/180) *
+    Math.cos(lat2*Math.PI/180) *
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+
+  return (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
+}
+
+const MAX_DISTANCE_M = 50;
+
+function canCollect(s) {
+  return getDistance(playerLat, playerLng, s.lat, s.lng) * 1000 <= MAX_DISTANCE_M;
+}
+
+// XP SYSTEM
+function addXP(amount) {
+  xp += amount;
+
+  const needed = level * 100;
+  if (xp >= needed) {
+    xp -= needed;
+    level++;
+    soundLevelUp.play();
+    alert("Level up ! Niveau " + level);
+  }
+
+  localStorage.setItem("xp", xp);
+  localStorage.setItem("level", level);
+  updateXP();
+  if (xp >= needed) {
+  xp -= needed;
+  level++;
+  soundLevelUp.play();
+  alert("Level up ! Niveau " + level);
+}
+}
+
+function updateXP() {
+  const needed = level * 100;
+  document.getElementById("xpText").innerText =
+    `Level ${level} (${xp}/${needed} XP)`;
+
+  document.getElementById("xpBar").style.width =
+    (xp / needed * 100) + "%";
+}
+
+// STATUES (inchangées)
+const statues = [
+{ id: 1, name: "Manneken Pis", rarity: "legendary", lat: 50.845, lng: 4.3499, desc: "Famous statue in Brussels.", img: "Bruxelles_Manneken_Pis.jpg" },
+
+{ id: 2, name: "Atomium", rarity: "legendary", lat: 50.8949, lng: 4.3416, desc: "Iconic structure of Brussels.", img: "The_Atomium_during_civil_twilight_(DSCF1135).jpg" },
+
+{ id: 3, name: "Jeanneke Pis", rarity: "rare", lat: 50.8486, lng: 4.3525, desc: "Female version of Manneken Pis.", img: "Jeanneke_Pis,_Brussels,_Belgium_(DSCF4010).jpg" },
+
+{ id: 4, name: "Grand Place", rarity: "legendary", lat: 50.8467, lng: 4.3525, desc: "Main square of Brussels.", img: "Grand_Place_de_Bruxelles.jpg" },
+
+{ id: 5, name: "Mont des Arts", rarity: "rare", lat: 50.8431, lng: 4.3569, desc: "Cultural viewpoint.", img: "Mont_des_Arts_during_morning_civil_twilight_(DSCF7450).jpg" },
+
+{ id: 6, name: "Parc du Cinquantenaire", rarity: "rare", lat: 50.8402, lng: 4.3920, desc: "Historic park.", img: "Parc_du_cinquantenaire_au_soir.jpg" },
+
+{ id: 7, name: "Royal Palace", rarity: "legendary", lat: 50.8426, lng: 4.3601, desc: "Royal residence.", img: "Palais_royal_de_Bruxelles_2021.jpg" },
+
+{ id: 8, name: "Place du Sablon", rarity: "rare", lat: 50.8406, lng: 4.3559, desc: "Historic square.", img: "Place_du_Petit-Sablon_(4258152744).jpg" },
+
+{ id: 9, name: "Bourse", rarity: "common", lat: 50.8480, lng: 4.3495, desc: "Old stock exchange.", img: "Side_Brussels_Stock_Exchange_2023.jpg" },
+
+{ id: 10, name: "Galeries St Hubert", rarity: "rare", lat: 50.8484, lng: 4.3549, desc: "Shopping galleries.", img: "Galeries_royales_Saint-Hubert,_Bruselas,_Bélgica,_2021-12-14,_DD_04-06_HDR.jpg" },
+
+{ id: 11, name: "Parc de Bruxelles", rarity: "common", lat: 50.8435, lng: 4.3620, desc: "Park.", img: "Parc_Royal_de_Bruxelles_(2008).jpg" },
+
+{ id: 12, name: "EU Parliament", rarity: "legendary", lat: 50.8385, lng: 4.3750, desc: "EU building.", img: "Parlement_européen_-_extérieur_(Strasbourg).jpg" },
+
+{ id: 13, name: "Place Flagey", rarity: "common", lat: 50.8260, lng: 4.3666, desc: "Square.", img: "Le_Flagey.jpg" },
+
+{ id: 14, name: "Bois de la Cambre", rarity: "rare", lat: 50.8007, lng: 4.3735, desc: "Forest park.", img: "Le_bois_de_la_Cambre_et_le_lac.JPG" },
+
+{ id: 15, name: "Grande Roue", rarity: "common", lat: 50.8333, lng: 4.3556, desc: "Wheel.", img: "Bruxelles_Grand'roue.jpg" },
+
+{ id: 16, name: "Botanical Garden", rarity: "rare", lat: 50.8500, lng: 4.3580, desc: "Garden.", img: "Jardin_botanique_&_Rotonde.jpg" },
+
+{ id: 17, name: "Tour & Taxis", rarity: "rare", lat: 50.8670, lng: 4.3470, desc: "Site.", img: "Tour_&_Taxis_Park_(2).jpg" },
+
+{ id: 18, name: "Saint-Gilles Town Hall", rarity: "common", lat: 50.8275, lng: 4.3450, desc: "Town hall.", img: "Hôtel_de_ville_de_Saint-Gilles_-_centre_02.jpg" },
+
+{ id: 19, name: "Koekelberg Basilica", rarity: "legendary", lat: 50.8623, lng: 4.3276, desc: "Huge basilica.", img: "Basilica_of_the_Sacred_Heart.jpg" },
+
+{ id: 20, name: "Schuman Roundabout", rarity: "common", lat: 50.8422, lng: 4.3810, desc: "EU zone.", img: "Olm_Cité_Kurt_rond-point_R._Schuman_2016.jpg" }
+];
+
+const markers = {};
+
+// ICON
+function createIcon(imgUrl) {
+  return L.icon({
+    iconUrl: imgUrl,
+    iconSize: [50, 50],
+    iconAnchor: [25, 25],
+    className: "statue-icon"
+  });
+}
+
+function getXPReward(s) {
+  if (s.rarity === "legendary") return 50;
+  if (s.rarity === "rare") return 30;
+  return 15;
+}
+
+// POPUP
+function popupHTML(s) {
+  const allowed = canCollect(s);
+
+  return `
+    <b>${s.name}</b><br>
+    ${s.desc}<br><br>
+    <button onclick="collect(${s.id})">
+      ${isCollected(s.id)
+        ? "✔ Collected"
+        : allowed
+          ? "Collect"
+          : "🚫 Too far"}
+    </button>
+  `;
+}
+
+// COLLECT
+window.collect = function(id) {
+  const s = statues.find(x => x.id === id);
+
+  if (!canCollect(s)) {
+    soundTooFar.play();
+    alert("Too far !");
+    return;
+  }
+
+  if (!collected.includes(id)) {
+    collected.push(id);
+
+    soundCollect.play();
+
+    save();
+
+    // XP UNE SEULE FOIS (IMPORTANT)
+    addXP(getXPReward(s));
+
+    render();
+    updateAllPopups();
+  }
+
+  document.body.classList.add("captureAnim");
+
+setTimeout(() => {
+  document.body.classList.remove("captureAnim");
+}, 400);
+
+};
+// MARKERS
+statues.forEach(s => {
+  const marker = L.marker([s.lat, s.lng], {
+    icon: createIcon(s.img)
+  }).addTo(map);
+
+  marker.bindPopup(popupHTML(s));
+  markers[s.id] = marker;
+});
+
+function updateAllPopups() {
+  statues.forEach(s => {
+    if (markers[s.id]) {
+      markers[s.id].setPopupContent(popupHTML(s));
+    }
+  });
+}
+
+function getBadge() {
+  const count = collected.length;
+
+  if (count >= 20) return "🏆 Bruxelles Master";
+  if (count >= 10) return "🥇 Explorateur";
+  if (count >= 5) return "🥈 Débutant";
+  return "👶 Nouveau joueur";
+}
+
+toggleCollection()
+ const div = document.getElementById("collection");
+
+  if (div.style.display === "none") {
+    div.style.display = "block";
+
+    div.innerHTML = statues
+      .filter(s => collected.includes(s.id))
+      .map(s => `
+        <div class="card">
+          <b>${s.name}</b><br>
+          ${s.rarity}
+        </div>
+      `).join("");
+  } else {
+    div.style.display = "none";
+  }
+
+
+// RENDER
+function render() {
+  updateXP();
+
+  document.getElementById("xpText").innerText =
+  `Level ${level} (${xp}/${level * 100} XP) | ${getBadge()}`;
+
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+
+  statues.forEach(s => {
+    const dist = (getDistance(playerLat, playerLng, s.lat, s.lng) * 1000).toFixed(0);
+
+    const div = document.createElement("div");
+    div.className = "card";
+
+    div.innerHTML = `
+      <div class="title">${s.name}</div>
+      <div>${s.desc}</div>
+      <div class="distance">${dist} m</div>
+      <div class="status ${isCollected(s.id) ? "yes" : "no"}">
+        ${isCollected(s.id) ? "Collected" : "Not collected"}
+      </div>
+    `;
+
+    div.onclick = () => {
+      map.setView([s.lat, s.lng], 16);
+      markers[s.id].openPopup();
+    };
+
+    list.appendChild(div);
+  });
+}
+
+render();
+
+function resetGame() {
+  if (!confirm("Reset XP, level et statues collectées ?")) return;
+
+  localStorage.removeItem("xp");
+  localStorage.removeItem("level");
+  localStorage.removeItem("collected");
+
+  xp = 0;
+  level = 1;
+  collected = [];
+
+  updateXP();
+  render();
+  updateAllPopups();
+
+  alert("Game reset !");
+}
+
+// SIDEBAR DRAG
+let sidebar = document.getElementById("sidebar");
+let handle = document.getElementById("dragHandle");
+
+let down = false;
+let startY = 0;
+
+handle.addEventListener("mousedown", e => { down = true; startY = e.clientY; });
+document.addEventListener("mousemove", e => {
+  if (!down) return;
+  if (e.clientY - startY > 80) sidebar.classList.add("closed");
+  if (e.clientY - startY < -80) sidebar.classList.remove("closed");
+});
+document.addEventListener("mouseup", () => down = false);
+
+</script>
+
+</body>
+</html>
